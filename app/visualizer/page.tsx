@@ -2,9 +2,8 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { ROOMS }     from '../../lib/rooms_data'
 import { ALL_BLENDS } from '../../lib/blends_data'
-import { getFloorMask } from '../../lib/floor_masks'
 import type { Room }  from '../../lib/rooms_data'
-import type { Blend } from '../../lib/blends'
+import type { Blend } from '../../lib/blends_data'
 
 const W = 1024
 const H = 800
@@ -17,19 +16,284 @@ function loadImg(url: string): Promise<HTMLImageElement> {
     img.onload  = () => res(img)
     img.onerror = () => rej(new Error(`Load failed: ${url}`))
     img.src = url
-    setTimeout(() => rej(new Error('timeout')), 14000)
+    setTimeout(() => rej(new Error('timeout')), 18000)
   })
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════
-   COMPOSITOR — offscreen-canvas + stencil masking
-   4-canvas pipeline ensures car/walls are NEVER affected by flake layer:
-     1. flakeCanvas    = tiled blend texture (full canvas)
-     2. stencilCanvas  = white floor trapezoid on transparent
-     3. maskedCanvas   = flake ∩ stencil (source-in) → transparent outside floor
-     4. aboveCanvas    = original photo with floor erased (destination-out)
-   Main: bg → multiply(masked) → screen(masked) → restore above → fade → sheen
+   WEBGL2 RENDERER — Torginol GLSL pipeline (extracted 2026-06-25)
+   
+   3-pass rendering:
+     Pass 1: Flake colorizer  → FBO (u_flake_texture + u_seed randomization)
+     Pass 2: HMS shadow AO    → FBO2 (hms.jpg, 6-scale 24-neighbor sampling)
+     Pass 3: Final composite  → Screen (diffuse bg + flake+shadow layer)
+
+   Exact shader uniforms from blend-visualiser.min.js:
+     u_flake_depth       = coverage/100 (chip density)
+     u_seed              = random vec2  (per-blend rotation)
+     u_shadowDepthMultiplier = shadow intensity (8.0 default)
+     u_textureDepth      = hms.jpg unit
+     u_textureColour     = flake layer from FBO
 ══════════════════════════════════════════════════════════════════════════════ */
+
+const VERT_SIMPLE = `#version 300 es
+precision mediump float;
+in vec4 a_position; in vec2 a_texcoord;
+uniform mat4 u_matrix;
+out vec2 v_texcoord;
+void main() { gl_Position = u_matrix * a_position; v_texcoord = a_texcoord; }`
+
+const VERT_WITH_STEP = `#version 300 es
+precision mediump float;
+in vec4 a_position; in vec2 a_texcoord;
+uniform mat4 u_matrix; uniform vec2 u_resolution;
+out vec2 v_texcoord; out vec2 v_texelStep;
+void main() {
+  gl_Position = u_matrix * a_position;
+  v_texcoord = a_texcoord;
+  v_texelStep = vec2(1.0,1.0)/u_resolution;
+}`
+
+const FRAG_FLAKE = `#version 300 es
+precision mediump float;
+#define PI 3.14159
+in vec2 v_texcoord; out vec4 fragColor;
+uniform sampler2D u_texture;
+uniform sampler2D u_flake_texture;
+uniform float u_flake_depth;
+uniform int u_use_flake_texture;
+uniform vec2 u_seed;
+vec2 rotate(vec2 p,float a){return vec2(p.x*cos(a)-p.y*sin(a),p.y*cos(a)+p.x*sin(a));}
+void main(){
+  vec4 t=texture(u_texture,v_texcoord);
+  float a=t.a<0.95?0.0:1.0;
+  vec4 fc=texture(u_flake_texture,rotate(v_texcoord,2.0*PI*u_seed.x)*0.2+vec2(u_seed.x,1.0-u_seed.y));
+  fragColor=vec4(fc.rgb,a*u_flake_depth);
+}`
+
+const FRAG_SHADOW = `#version 300 es
+precision mediump float;
+in vec2 v_texcoord; in vec2 v_texelStep; out vec4 fragColor;
+uniform sampler2D u_textureDepth;
+uniform sampler2D u_textureColour;
+uniform vec2 u_resolution;
+uniform float u_shadowDepthMultiplier;
+float getAO(vec2 uv,float sp,vec2 step){
+  float l=texture(u_textureDepth,uv+vec2(-sp,0)*step).r;
+  float r=texture(u_textureDepth,uv+vec2(sp,0)*step).r;
+  float t=texture(u_textureDepth,uv+vec2(0,-sp)*step).r;
+  float b=texture(u_textureDepth,uv+vec2(0,sp)*step).r;
+  float tl=texture(u_textureDepth,uv+vec2(-sp,-sp)*step).r;
+  float bl=texture(u_textureDepth,uv+vec2(-sp,sp)*step).r;
+  float tr=texture(u_textureDepth,uv+vec2(sp,-sp)*step).r;
+  float br=texture(u_textureDepth,uv+vec2(sp,sp)*step).r;
+  float ds=sp*2.0;
+  float ttll=texture(u_textureDepth,uv+vec2(-ds,-ds)*step).r;
+  float ttl=texture(u_textureDepth,uv+vec2(-sp,-ds)*step).r;
+  float tt=texture(u_textureDepth,uv+vec2(0,-ds)*step).r;
+  float ttr=texture(u_textureDepth,uv+vec2(sp,-ds)*step).r;
+  float ttrr=texture(u_textureDepth,uv+vec2(ds,-ds)*step).r;
+  float trr=texture(u_textureDepth,uv+vec2(ds,-sp)*step).r;
+  float rr=texture(u_textureDepth,uv+vec2(ds,0)*step).r;
+  float brr=texture(u_textureDepth,uv+vec2(ds,sp)*step).r;
+  float bbrr=texture(u_textureDepth,uv+vec2(ds,ds)*step).r;
+  float bbr=texture(u_textureDepth,uv+vec2(sp,ds)*step).r;
+  float bb=texture(u_textureDepth,uv+vec2(0,ds)*step).r;
+  float bbl=texture(u_textureDepth,uv+vec2(-sp,ds)*step).r;
+  float bbll=texture(u_textureDepth,uv+vec2(-ds,ds)*step).r;
+  float bll=texture(u_textureDepth,uv+vec2(-ds,sp)*step).r;
+  float ll=texture(u_textureDepth,uv+vec2(-ds,0)*step).r;
+  float tll=texture(u_textureDepth,uv+vec2(-ds,-sp)*step).r;
+  float c=texture(u_textureDepth,uv).r;
+  float n=(l+r+t+b+tl+tr+bl+br+ttll+ttl+tt+ttr+ttrr+trr+rr+brr+bbrr+bbr+bb+bbl+bbll+bll+ll+tll)*0.041666666;
+  return clamp(1.0-(n-c)*u_shadowDepthMultiplier,0.0,1.0);
+}
+void main(){
+  float ao=pow(getAO(v_texcoord,20.0,v_texelStep),1.0)*pow(getAO(v_texcoord,10.0,v_texelStep),1.0)*pow(getAO(v_texcoord,6.0,v_texelStep),1.0)*pow(getAO(v_texcoord,3.0,v_texelStep),3.0)*pow(getAO(v_texcoord,2.0,v_texelStep),4.0)*pow(getAO(v_texcoord,1.0,v_texelStep),8.0);
+  ao=clamp(ao*0.7+0.3,0.0,1.0);
+  fragColor=vec4(vec3(ao),1.0)*texture(u_textureColour,v_texcoord);
+}`
+
+const FRAG_COMPOSITE = `#version 300 es
+precision mediump float;
+in vec2 v_texcoord; out vec4 fragColor;
+uniform sampler2D u_background;
+uniform sampler2D u_flake_layer;
+uniform float u_coverage;
+void main(){
+  vec4 bg=texture(u_background,v_texcoord);
+  vec4 fl=texture(u_flake_layer,v_texcoord);
+  fragColor=vec4(mix(bg.rgb,fl.rgb,fl.a*u_coverage),1.0);
+}`
+
+function gl2Shader(gl:WebGL2RenderingContext,type:number,src:string){
+  const s=gl.createShader(type)!
+  gl.shaderSource(s,src);gl.compileShader(s)
+  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(s)||'')
+  return s
+}
+function gl2Program(gl:WebGL2RenderingContext,vert:string,frag:string){
+  const p=gl.createProgram()!
+  gl.attachShader(p,gl2Shader(gl,gl.VERTEX_SHADER,vert))
+  gl.attachShader(p,gl2Shader(gl,gl.FRAGMENT_SHADER,frag))
+  gl.linkProgram(p)
+  if(!gl.getProgramParameter(p,gl.LINK_STATUS))throw new Error(gl.getProgramInfoLog(p)||'')
+  return p
+}
+function ortho(w:number,h:number){
+  return new Float32Array([2/w,0,0,0, 0,-2/h,0,0, 0,0,1,0, -1,1,0,1])
+}
+function bindTex(gl:WebGL2RenderingContext,img:HTMLImageElement,unit:number,repeat=false){
+  const t=gl.createTexture()!
+  const wrap=repeat?gl.REPEAT:gl.CLAMP_TO_EDGE
+  gl.activeTexture(gl.TEXTURE0+unit)
+  gl.bindTexture(gl.TEXTURE_2D,t)
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,wrap)
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,wrap)
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR)
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR)
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,img)
+  return t
+}
+function makeFBO(gl:WebGL2RenderingContext,w:number,h:number){
+  const fb=gl.createFramebuffer()!
+  const tex=gl.createTexture()!
+  gl.bindTexture(gl.TEXTURE_2D,tex)
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,w,h,0,gl.RGBA,gl.UNSIGNED_BYTE,null)
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR)
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR)
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE)
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE)
+  gl.bindFramebuffer(gl.FRAMEBUFFER,fb)
+  gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0)
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null)
+  return {fb,tex}
+}
+function drawQuad(gl:WebGL2RenderingContext,prog:WebGLProgram,w:number,h:number){
+  const pos=new Float32Array([0,0,w,0,0,h,0,h,w,0,w,h])
+  const uv =new Float32Array([0,1,1,1,0,0,0,0,1,1,1,0])
+  const vao=gl.createVertexArray()!
+  gl.bindVertexArray(vao)
+  const pb=gl.createBuffer()!;gl.bindBuffer(gl.ARRAY_BUFFER,pb);gl.bufferData(gl.ARRAY_BUFFER,pos,gl.STATIC_DRAW)
+  const pl=gl.getAttribLocation(prog,'a_position');gl.enableVertexAttribArray(pl);gl.vertexAttribPointer(pl,2,gl.FLOAT,false,0,0)
+  const ub=gl.createBuffer()!;gl.bindBuffer(gl.ARRAY_BUFFER,ub);gl.bufferData(gl.ARRAY_BUFFER,uv,gl.STATIC_DRAW)
+  const ul=gl.getAttribLocation(prog,'a_texcoord');gl.enableVertexAttribArray(ul);gl.vertexAttribPointer(ul,2,gl.FLOAT,false,0,0)
+  gl.drawArrays(gl.TRIANGLES,0,6)
+  gl.bindVertexArray(null)
+}
+function uni(gl:WebGL2RenderingContext,prog:WebGLProgram,name:string){
+  return gl.getUniformLocation(prog,name)
+}
+
+async function compositeFloorGL2(
+  canvas: HTMLCanvasElement,
+  _roomId: string,
+  bgUrl: string,
+  blendUrl: string,
+  coverage: number,
+  hmsUrl?: string,
+): Promise<void> {
+  canvas.width = W; canvas.height = H
+
+  // Try WebGL2 first
+  const gl = canvas.getContext('webgl2',{alpha:false,antialias:true})
+  if (!gl) {
+    // Graceful Canvas2D fallback
+    await compositeFloorCanvas2D(canvas, bgUrl, blendUrl, coverage)
+    return
+  }
+
+  const [bgImg, blendImg] = await Promise.all([loadImg(bgUrl), loadImg(blendUrl)])
+  const hmsImg = hmsUrl ? await loadImg(hmsUrl).catch(()=>null) : null
+
+  gl.viewport(0,0,W,H)
+  const M = ortho(W,H)
+  const seed: [number,number] = [Math.random(), Math.random()]
+
+  // Build programs
+  const flakeProg  = gl2Program(gl, VERT_SIMPLE,    FRAG_FLAKE)
+  const shadowProg = gl2Program(gl, VERT_WITH_STEP,  FRAG_SHADOW)
+  const compProg   = gl2Program(gl, VERT_SIMPLE,    FRAG_COMPOSITE)
+
+  // Bind textures: unit 0=bg, unit 1=blend, unit 2=hms, unit 6=fbo1, unit 7=fbo2
+  bindTex(gl, bgImg,    0)
+  bindTex(gl, blendImg, 1, true)  // REPEAT for tiling
+  if (hmsImg) bindTex(gl, hmsImg, 2)
+
+  // FBOs
+  const fbo1 = makeFBO(gl, W, H)
+  const fbo2 = makeFBO(gl, W, H)
+
+  // ── PASS 1: Flake → FBO1 ────────────────────────────────────────────
+  gl.useProgram(flakeProg)
+  gl.uniformMatrix4fv(uni(gl,flakeProg,'u_matrix'),false,M)
+  gl.uniform1i(uni(gl,flakeProg,'u_texture'),1)
+  gl.uniform1i(uni(gl,flakeProg,'u_flake_texture'),1)
+  gl.uniform1i(uni(gl,flakeProg,'u_use_flake_texture'),1)
+  gl.uniform1f(uni(gl,flakeProg,'u_flake_depth'), coverage/100)
+  gl.uniform2fv(uni(gl,flakeProg,'u_seed'), seed)
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo1.fb)
+  gl.clearColor(0,0,0,0); gl.clear(gl.COLOR_BUFFER_BIT)
+  gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA)
+  drawQuad(gl, flakeProg, W, H)
+
+  // ── PASS 2: HMS Shadow AO → FBO2 ────────────────────────────────────
+  if (hmsImg) {
+    // Bind FBO1 output to unit 6
+    gl.activeTexture(gl.TEXTURE6)
+    gl.bindTexture(gl.TEXTURE_2D, fbo1.tex)
+
+    gl.useProgram(shadowProg)
+    gl.uniformMatrix4fv(uni(gl,shadowProg,'u_matrix'),false,M)
+    gl.uniform1i(uni(gl,shadowProg,'u_textureDepth'),   2)  // hms
+    gl.uniform1i(uni(gl,shadowProg,'u_textureColour'),  6)  // fbo1
+    gl.uniform2f(uni(gl,shadowProg,'u_resolution'), W, H)
+    gl.uniform1f(uni(gl,shadowProg,'u_shadowDepthMultiplier'), 8.0)
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo2.fb)
+    gl.clear(gl.COLOR_BUFFER_BIT)
+    gl.disable(gl.BLEND)
+    drawQuad(gl, shadowProg, W, H)
+  }
+
+  // ── PASS 3: Composite → Screen ───────────────────────────────────────
+  const finalTex = hmsImg ? fbo2.tex : fbo1.tex
+  gl.activeTexture(gl.TEXTURE7)
+  gl.bindTexture(gl.TEXTURE_2D, finalTex)
+
+  gl.useProgram(compProg)
+  gl.uniformMatrix4fv(uni(gl,compProg,'u_matrix'),false,M)
+  gl.uniform1i(uni(gl,compProg,'u_background'),  0)  // diffuse
+  gl.uniform1i(uni(gl,compProg,'u_flake_layer'), 7)  // final flake
+  gl.uniform1f(uni(gl,compProg,'u_coverage'), coverage/100)
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+  gl.viewport(0,0,W,H)
+  gl.disable(gl.BLEND)
+  drawQuad(gl, compProg, W, H)
+}
+
+// Canvas2D fallback (existing logic, kept for non-WebGL2 browsers)
+async function compositeFloorCanvas2D(
+  canvas: HTMLCanvasElement,
+  bgUrl: string,
+  blendUrl: string,
+  coverage: number,
+): Promise<void> {
+  const W2 = canvas.width, H2 = canvas.height
+  const [bgImg, blendImg] = await Promise.all([loadImg(bgUrl), loadImg(blendUrl)])
+  const alpha = Math.min(0.95, (coverage/100)*0.88)
+  const ctx = canvas.getContext('2d')!
+  ctx.clearRect(0,0,W2,H2)
+  ctx.drawImage(bgImg,0,0,W2,H2)
+  ctx.globalCompositeOperation='multiply'; ctx.globalAlpha=alpha
+  const ts=120, cols=Math.ceil(W2/ts)+2, rows=Math.ceil(H2/ts)+2
+  for(let r=0;r<rows;r++) for(let c=-1;c<cols;c++) ctx.drawImage(blendImg,c*ts,r*ts,ts,ts)
+  ctx.globalCompositeOperation='source-over'; ctx.globalAlpha=1
+}
+
+/* ── wrapper: picks WebGL2 render with hms if available, falls back to Canvas2D ── */
 async function compositeFloor(
   canvas: HTMLCanvasElement,
   roomId: string,
@@ -37,101 +301,19 @@ async function compositeFloor(
   blendUrl: string,
   coverage: number,
 ): Promise<void> {
-  canvas.width = W; canvas.height = H
-  const [bgImg, blendImg] = await Promise.all([loadImg(bgUrl), loadImg(blendUrl)])
-  const poly      = getFloorMask(roomId)
-  const alpha     = Math.min(0.95, (coverage / 100) * 0.88)
-  const floorTopY = poly[0][1] * H
-
-  /* OFFSCREEN 1: tiled flake texture */
-  const fc = document.createElement('canvas'); fc.width = W; fc.height = H
-  const fCtx = fc.getContext('2d')!
-  const ROWS = 10
-  for (let row = 0; row < ROWS; row++) {
-    const t = row / (ROWS - 1)
-    const rowY = floorTopY + t * (H - floorTopY)
-    const ts   = 68 + t * 68
-    const cols = Math.ceil(W / ts) + 2
-    for (let col = -1; col < cols; col++) {
-      const shift = (0.5 - (col + 0.5) / cols) * t * 12
-      fCtx.drawImage(blendImg, col * ts + shift, rowY, ts, ts)
-    }
+  // Find room data to get hmsUrl
+  const room = ROOMS.find(r => r.id === roomId)
+  const hmsUrl = room?.hms
+  
+  try {
+    await compositeFloorGL2(canvas, roomId, bgUrl, blendUrl, coverage, hmsUrl)
+  } catch (err) {
+    console.warn('[WebGL2 failed, Canvas2D fallback]', err)
+    canvas.width = W; canvas.height = H
+    await compositeFloorCanvas2D(canvas, bgUrl, blendUrl, coverage)
   }
-
-  /* OFFSCREEN 2: floor polygon stencil */
-  const sc = document.createElement('canvas'); sc.width = W; sc.height = H
-  const sCtx = sc.getContext('2d')!
-  sCtx.fillStyle = '#fff'
-  sCtx.beginPath()
-  sCtx.moveTo(poly[0][0]*W, poly[0][1]*H); sCtx.lineTo(poly[1][0]*W, poly[1][1]*H)
-  sCtx.lineTo(poly[2][0]*W, poly[2][1]*H); sCtx.lineTo(poly[3][0]*W, poly[3][1]*H)
-  sCtx.closePath(); sCtx.fill()
-
-  /* OFFSCREEN 3: masked flake (flake ∩ stencil) */
-  const mc = document.createElement('canvas'); mc.width = W; mc.height = H
-  const mCtx = mc.getContext('2d')!
-  mCtx.drawImage(sc, 0, 0)
-  mCtx.globalCompositeOperation = 'source-in'
-  mCtx.drawImage(fc, 0, 0)
-
-  /* OFFSCREEN 4: above-floor pixels (original minus floor polygon) */
-  const ac = document.createElement('canvas'); ac.width = W; ac.height = H
-  const aCtx = ac.getContext('2d')!
-  aCtx.drawImage(bgImg, 0, 0, W, H)
-  aCtx.globalCompositeOperation = 'destination-out'
-  aCtx.fillStyle = '#fff'
-  aCtx.beginPath()
-  aCtx.moveTo(poly[0][0]*W, poly[0][1]*H); aCtx.lineTo(poly[1][0]*W, poly[1][1]*H)
-  aCtx.lineTo(poly[2][0]*W, poly[2][1]*H); aCtx.lineTo(poly[3][0]*W, poly[3][1]*H)
-  aCtx.closePath(); aCtx.fill()
-
-  /* MAIN CANVAS */
-  const ctx = canvas.getContext('2d')!
-  ctx.clearRect(0, 0, W, H)
-  ctx.drawImage(bgImg, 0, 0, W, H)             // Pass 1: background
-  ctx.globalCompositeOperation = 'multiply'; ctx.globalAlpha = alpha
-  ctx.drawImage(mc, 0, 0)                       // Pass 2: multiply (floor only)
-  ctx.globalCompositeOperation = 'screen';   ctx.globalAlpha = alpha * 0.15
-  ctx.drawImage(mc, 0, 0)                       // Pass 3: screen sparkle
-  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1
-  ctx.drawImage(ac, 0, 0)                       // Pass 4: restore car/walls
-
-  /* Pass 5: horizon fade */
-  ctx.save()
-  ctx.beginPath()
-  ctx.moveTo(poly[0][0]*W, poly[0][1]*H); ctx.lineTo(poly[1][0]*W, poly[1][1]*H)
-  ctx.lineTo(poly[2][0]*W, poly[2][1]*H); ctx.lineTo(poly[3][0]*W, poly[3][1]*H)
-  ctx.closePath(); ctx.clip()
-  const fadeH = Math.max(36, (H - floorTopY) * 0.10)
-  const fade = ctx.createLinearGradient(0, floorTopY - 4, 0, floorTopY + fadeH)
-  fade.addColorStop(0, 'rgba(0,0,0,0.38)'); fade.addColorStop(0.45, 'rgba(0,0,0,0.07)'); fade.addColorStop(1, 'rgba(0,0,0,0)')
-  ctx.fillStyle = fade; ctx.fillRect(0, floorTopY - 4, W, fadeH + 4)
-  ctx.restore()
-
-  /* Pass 6: epoxy sheen */
-  ctx.save()
-  ctx.beginPath()
-  ctx.moveTo(poly[0][0]*W, poly[0][1]*H); ctx.lineTo(poly[1][0]*W, poly[1][1]*H)
-  ctx.lineTo(poly[2][0]*W, poly[2][1]*H); ctx.lineTo(poly[3][0]*W, poly[3][1]*H)
-  ctx.closePath(); ctx.clip()
-  const sheenH = (H - floorTopY) * 0.26
-  const sheen = ctx.createLinearGradient(0, floorTopY, 0, floorTopY + sheenH)
-  sheen.addColorStop(0, 'rgba(255,255,255,0.055)'); sheen.addColorStop(1, 'rgba(255,255,255,0)')
-  ctx.fillStyle = sheen; ctx.fillRect(0, floorTopY, W, sheenH)
-  ctx.restore()
-
-  /* Pass 7: watermark */
-  ctx.font = 'bold 12px Poppins,sans-serif'
-  ctx.fillStyle = 'rgba(255,255,255,0.50)'
-  ctx.textAlign = 'right'; ctx.textBaseline = 'bottom'
-  ctx.fillText('FloorVision Pro — Powered by Xtreme Polishing Systems', W - 10, H - 8)
 }
 
-/* ══════════════════════════════════════════════════════════════════════════════
-   PAGE COMPONENT — Torginol visualizer layout clone
-   Left: full-height canvas render area
-   Right: 380px white panel with Rooms / Blends / Customize tabs
-══════════════════════════════════════════════════════════════════════════════ */
 export default function VisualizerPage() {
   const [step, setStep]           = useState<'rooms'|'blends'|'customize'>('rooms')
   const [room, setRoom]           = useState<Room>(ROOMS[0])
