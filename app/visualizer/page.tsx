@@ -233,18 +233,18 @@ export default function VisualizerPage() {
                   alignItems:'center', justifyContent:'center',
                   background:'rgba(26,26,26,0.75)', backdropFilter:'blur(4px)',
                 }}>
-                  {/* 3-dot spinner matching FloorWiz */}
-                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="80" height="48">
-                    <circle fill="#C9A84C" stroke="#C9A84C" strokeWidth="15" r="15" cx="40" cy="100">
-                      <animate attributeName="opacity" calcMode="spline" dur="2" values="1;0;1;" keySplines=".5 0 .5 1;.5 0 .5 1" repeatCount="indefinite" begin="-0.4"/>
-                    </circle>
-                    <circle fill="#C9A84C" stroke="#C9A84C" strokeWidth="15" r="15" cx="100" cy="100">
-                      <animate attributeName="opacity" calcMode="spline" dur="2" values="1;0;1;" keySplines=".5 0 .5 1;.5 0 .5 1" repeatCount="indefinite" begin="-0.2"/>
-                    </circle>
-                    <circle fill="#C9A84C" stroke="#C9A84C" strokeWidth="15" r="15" cx="160" cy="100">
-                      <animate attributeName="opacity" calcMode="spline" dur="2" values="1;0;1;" keySplines=".5 0 .5 1;.5 0 .5 1" repeatCount="indefinite" begin="0"/>
-                    </circle>
-                  </svg>
+                  {/* 3-dot spinner — CSS animation (matches FloorWiz visual) */}
+                  <style>{`
+                    @keyframes fvDot{0%,100%{opacity:1}50%{opacity:0.1}}
+                    .fv-dot{width:14px;height:14px;border-radius:50%;background:#C9A84C;animation:fvDot 1.6s ease-in-out infinite;}
+                    .fv-dot:nth-child(1){animation-delay:-0.32s}
+                    .fv-dot:nth-child(2){animation-delay:-0.16s}
+                  `}</style>
+                  <div data-spinner="3dot" style={{display:'flex',gap:10,alignItems:'center'}}>
+                    <div className="fv-dot"/>
+                    <div className="fv-dot"/>
+                    <div className="fv-dot"/>
+                  </div>
                   <div style={{ fontFamily:'Poppins', fontWeight:600, fontSize:14, color:'rgba(255,255,255,0.7)', marginTop:12, letterSpacing:'0.04em' }}>
                     Rendering floor...
                   </div>
