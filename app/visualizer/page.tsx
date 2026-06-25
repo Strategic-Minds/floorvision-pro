@@ -32,7 +32,9 @@ export default function VisualizerPage() {
   const collections = ['All', ...Array.from(new Set(ALL_BLENDS.map(b => b.collection).filter(Boolean)))]
 
   const filtered = ALL_BLENDS.filter(b => {
-    const bSized  = b.id.endsWith(`-${size}`)
+    // FB blends have size variants (XPS-FB201-18). Non-FB blends (QB, UV, etc.) show at all sizes
+    const isFB    = b.id.includes('-FB')
+    const bSized  = !isFB || b.id.endsWith(`-${size}`)
     const bColl   = collection === 'All' || b.collection === collection
     const bSearch = !search || b.name.toLowerCase().includes(search.toLowerCase()) || b.tags.some(t => t.toLowerCase().includes(search.toLowerCase()))
     return bSized && bColl && bSearch
