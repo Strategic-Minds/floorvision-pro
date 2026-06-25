@@ -1,18 +1,15 @@
 'use client'
 import { useState, useRef, useCallback, useEffect } from 'react'
-import { SIZES } from '../../lib/blends'
-import { ROOMS } from '../../lib/rooms_data'
+import { ROOMS }     from '../../lib/rooms_data'
 import { ALL_BLENDS } from '../../lib/blends_data'
 import { getFloorMask } from '../../lib/floor_masks'
-import type { Room } from '../../lib/rooms_data'
+import type { Room }  from '../../lib/rooms_data'
 import type { Blend } from '../../lib/blends'
 
 const W = 1024
 const H = 800
-const TABS = ['Rooms', 'Blends', 'Customize'] as const
-type Tab = typeof TABS[number]
 
-// ─── image loader ──────────────────────────────────────────────────────────────
+/* ── image loader ─────────────────────────────────────────────────────────── */
 function loadImg(url: string): Promise<HTMLImageElement> {
   return new Promise((res, rej) => {
     const img = new Image()
@@ -24,34 +21,15 @@ function loadImg(url: string): Promise<HTMLImageElement> {
   })
 }
 
-// ─── COMPOSITOR ───────────────────────────────────────────────────────────────
-//
-// DESIGN: offscreen-canvas + stencil masking strategy
-//
-//  ┌─────────────────────────────────────────────────────────────────────────┐
-//  │  flakeCanvas   = tiled blend texture, edge-to-edge, no clip            │
-//  │  stencilCanvas = white floor polygon on transparent black               │
-//  │  maskedFlake   = flakeCanvas ∩ stencil  (source-in composite)          │
-//  │                  → flake pixels ONLY inside floor polygon, ZERO bleed  │
-//  │  aboveCanvas   = original bgImg with floor polygon erased               │
-//  │                  → car, walls, ceiling at pixel-level accuracy          │
-//  │                                                                         │
-//  │  Main canvas pipeline:                                                  │
-//  │    1. Draw bgImg (full)                                                 │
-//  │    2. Draw maskedFlake  [multiply, alpha]   ← floor only               │
-//  │    3. Draw maskedFlake  [screen,   α*0.15]  ← sparkle, floor only      │
-//  │    4. Draw aboveCanvas  [source-over, 1.0]  ← restore car/walls        │
-//  │    5. Horizon fade clip to floor polygon                                │
-//  │    6. Sheen clip to floor polygon                                       │
-//  │    7. Watermark                                                         │
-//  └─────────────────────────────────────────────────────────────────────────┘
-//
-// WHY steps 2+3 are safe even though they use multiply/screen:
-//   maskedFlake is TRANSPARENT outside the floor polygon.
-//   multiply(rgba, transparent) = transparent → no effect on bg pixels.
-//   Step 4 then stamps the original photo back on top for everything above
-//   the floor horizon, providing a hard pixel-accurate guarantee.
-//
+/* ══════════════════════════════════════════════════════════════════════════════
+   COMPOSITOR — offscreen-canvas + stencil masking
+   4-canvas pipeline ensures car/walls are NEVER affected by flake layer:
+     1. flakeCanvas    = tiled blend texture (full canvas)
+     2. stencilCanvas  = white floor trapezoid on transparent
+     3. maskedCanvas   = flake ∩ stencil (source-in) → transparent outside floor
+     4. aboveCanvas    = original photo with floor erased (destination-out)
+   Main: bg → multiply(masked) → screen(masked) → restore above → fade → sheen
+══════════════════════════════════════════════════════════════════════════════ */
 async function compositeFloor(
   canvas: HTMLCanvasElement,
   roomId: string,
@@ -59,374 +37,365 @@ async function compositeFloor(
   blendUrl: string,
   coverage: number,
 ): Promise<void> {
-  canvas.width  = W
-  canvas.height = H
-
+  canvas.width = W; canvas.height = H
   const [bgImg, blendImg] = await Promise.all([loadImg(bgUrl), loadImg(blendUrl)])
-
   const poly      = getFloorMask(roomId)
   const alpha     = Math.min(0.95, (coverage / 100) * 0.88)
-  const floorTopY = poly[0][1] * H   // pixel-Y of floor horizon
+  const floorTopY = poly[0][1] * H
 
-  // ── 1. OFFSCREEN: tiled flake texture (full canvas, perspective scaling) ──
-  const flakeCanvas    = document.createElement('canvas')
-  flakeCanvas.width    = W
-  flakeCanvas.height   = H
-  const fCtx           = flakeCanvas.getContext('2d')!
-  fCtx.globalCompositeOperation = 'source-over'
-  fCtx.globalAlpha = 1
-
+  /* OFFSCREEN 1: tiled flake texture */
+  const fc = document.createElement('canvas'); fc.width = W; fc.height = H
+  const fCtx = fc.getContext('2d')!
   const ROWS = 10
   for (let row = 0; row < ROWS; row++) {
-    const t        = row / (ROWS - 1)            // 0 = horizon, 1 = camera
-    const rowY     = floorTopY + t * (H - floorTopY)
-    const tileSize = 68 + t * 68                 // 68 px at horizon → 136 px at camera
-    const cols     = Math.ceil(W / tileSize) + 2
+    const t = row / (ROWS - 1)
+    const rowY = floorTopY + t * (H - floorTopY)
+    const ts   = 68 + t * 68
+    const cols = Math.ceil(W / ts) + 2
     for (let col = -1; col < cols; col++) {
-      // Mild lateral convergence toward vertical centre line
       const shift = (0.5 - (col + 0.5) / cols) * t * 12
-      fCtx.drawImage(blendImg, col * tileSize + shift, rowY, tileSize, tileSize)
+      fCtx.drawImage(blendImg, col * ts + shift, rowY, ts, ts)
     }
   }
 
-  // ── 2. OFFSCREEN: white floor-polygon stencil ─────────────────────────────
-  const stencilCanvas  = document.createElement('canvas')
-  stencilCanvas.width  = W
-  stencilCanvas.height = H
-  const sCtx           = stencilCanvas.getContext('2d')!
-  sCtx.clearRect(0, 0, W, H)
-  sCtx.fillStyle = '#ffffff'
+  /* OFFSCREEN 2: floor polygon stencil */
+  const sc = document.createElement('canvas'); sc.width = W; sc.height = H
+  const sCtx = sc.getContext('2d')!
+  sCtx.fillStyle = '#fff'
   sCtx.beginPath()
-  sCtx.moveTo(poly[0][0] * W, poly[0][1] * H)
-  sCtx.lineTo(poly[1][0] * W, poly[1][1] * H)
-  sCtx.lineTo(poly[2][0] * W, poly[2][1] * H)
-  sCtx.lineTo(poly[3][0] * W, poly[3][1] * H)
-  sCtx.closePath()
-  sCtx.fill()
+  sCtx.moveTo(poly[0][0]*W, poly[0][1]*H); sCtx.lineTo(poly[1][0]*W, poly[1][1]*H)
+  sCtx.lineTo(poly[2][0]*W, poly[2][1]*H); sCtx.lineTo(poly[3][0]*W, poly[3][1]*H)
+  sCtx.closePath(); sCtx.fill()
 
-  // ── 3. OFFSCREEN: flake texture masked to floor polygon (source-in) ────────
-  //    source-in keeps ONLY pixels where destination (stencil) is opaque.
-  //    Result: flake texture is visible ONLY inside the floor polygon.
-  //    Every pixel outside the polygon is fully transparent (alpha = 0).
-  const maskedCanvas   = document.createElement('canvas')
-  maskedCanvas.width   = W
-  maskedCanvas.height  = H
-  const mCtx           = maskedCanvas.getContext('2d')!
-  mCtx.drawImage(stencilCanvas, 0, 0)          // destination = stencil (white floor)
-  mCtx.globalCompositeOperation = 'source-in'  // keep src where dest is opaque
-  mCtx.globalAlpha = 1
-  mCtx.drawImage(flakeCanvas, 0, 0)            // source = flake texture
+  /* OFFSCREEN 3: masked flake (flake ∩ stencil) */
+  const mc = document.createElement('canvas'); mc.width = W; mc.height = H
+  const mCtx = mc.getContext('2d')!
+  mCtx.drawImage(sc, 0, 0)
+  mCtx.globalCompositeOperation = 'source-in'
+  mCtx.drawImage(fc, 0, 0)
 
-  // ── 4. OFFSCREEN: above-floor pixels (car, walls, ceiling) ────────────────
-  //    Draw original photo, then erase the floor polygon area.
-  //    Result: only the pixels ABOVE the floor horizon survive — exact original values.
-  const aboveCanvas    = document.createElement('canvas')
-  aboveCanvas.width    = W
-  aboveCanvas.height   = H
-  const aCtx           = aboveCanvas.getContext('2d')!
+  /* OFFSCREEN 4: above-floor pixels (original minus floor polygon) */
+  const ac = document.createElement('canvas'); ac.width = W; ac.height = H
+  const aCtx = ac.getContext('2d')!
   aCtx.drawImage(bgImg, 0, 0, W, H)
   aCtx.globalCompositeOperation = 'destination-out'
-  aCtx.fillStyle = '#ffffff'
+  aCtx.fillStyle = '#fff'
   aCtx.beginPath()
-  aCtx.moveTo(poly[0][0] * W, poly[0][1] * H)
-  aCtx.lineTo(poly[1][0] * W, poly[1][1] * H)
-  aCtx.lineTo(poly[2][0] * W, poly[2][1] * H)
-  aCtx.lineTo(poly[3][0] * W, poly[3][1] * H)
-  aCtx.closePath()
-  aCtx.fill()
+  aCtx.moveTo(poly[0][0]*W, poly[0][1]*H); aCtx.lineTo(poly[1][0]*W, poly[1][1]*H)
+  aCtx.lineTo(poly[2][0]*W, poly[2][1]*H); aCtx.lineTo(poly[3][0]*W, poly[3][1]*H)
+  aCtx.closePath(); aCtx.fill()
 
-  // ── MAIN CANVAS PIPELINE ──────────────────────────────────────────────────
+  /* MAIN CANVAS */
   const ctx = canvas.getContext('2d')!
   ctx.clearRect(0, 0, W, H)
+  ctx.drawImage(bgImg, 0, 0, W, H)             // Pass 1: background
+  ctx.globalCompositeOperation = 'multiply'; ctx.globalAlpha = alpha
+  ctx.drawImage(mc, 0, 0)                       // Pass 2: multiply (floor only)
+  ctx.globalCompositeOperation = 'screen';   ctx.globalAlpha = alpha * 0.15
+  ctx.drawImage(mc, 0, 0)                       // Pass 3: screen sparkle
+  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1
+  ctx.drawImage(ac, 0, 0)                       // Pass 4: restore car/walls
 
-  // Pass 1: full background photo
-  ctx.globalCompositeOperation = 'source-over'
-  ctx.globalAlpha = 1
-  ctx.drawImage(bgImg, 0, 0, W, H)
-
-  // Pass 2: multiply flake layer (maskedCanvas is transparent outside floor → no bleed)
-  ctx.globalCompositeOperation = 'multiply'
-  ctx.globalAlpha = alpha
-  ctx.drawImage(maskedCanvas, 0, 0)
-
-  // Pass 3: screen sparkle pass
-  ctx.globalCompositeOperation = 'screen'
-  ctx.globalAlpha = alpha * 0.15
-  ctx.drawImage(maskedCanvas, 0, 0)
-
-  // Reset blending
-  ctx.globalCompositeOperation = 'source-over'
-  ctx.globalAlpha = 1
-
-  // Pass 4: restore above-floor pixels (car, walls — pixel-perfect original)
-  ctx.drawImage(aboveCanvas, 0, 0)
-
-  // Pass 5: horizon fade — softens the hard floor edge
+  /* Pass 5: horizon fade */
   ctx.save()
   ctx.beginPath()
-  ctx.moveTo(poly[0][0] * W, poly[0][1] * H)
-  ctx.lineTo(poly[1][0] * W, poly[1][1] * H)
-  ctx.lineTo(poly[2][0] * W, poly[2][1] * H)
-  ctx.lineTo(poly[3][0] * W, poly[3][1] * H)
-  ctx.closePath()
-  ctx.clip()
+  ctx.moveTo(poly[0][0]*W, poly[0][1]*H); ctx.lineTo(poly[1][0]*W, poly[1][1]*H)
+  ctx.lineTo(poly[2][0]*W, poly[2][1]*H); ctx.lineTo(poly[3][0]*W, poly[3][1]*H)
+  ctx.closePath(); ctx.clip()
   const fadeH = Math.max(36, (H - floorTopY) * 0.10)
-  const fade  = ctx.createLinearGradient(0, floorTopY - 4, 0, floorTopY + fadeH)
-  fade.addColorStop(0,   'rgba(0,0,0,0.38)')
-  fade.addColorStop(0.45,'rgba(0,0,0,0.07)')
-  fade.addColorStop(1,   'rgba(0,0,0,0.00)')
-  ctx.fillStyle = fade
-  ctx.fillRect(0, floorTopY - 4, W, fadeH + 4)
+  const fade = ctx.createLinearGradient(0, floorTopY - 4, 0, floorTopY + fadeH)
+  fade.addColorStop(0, 'rgba(0,0,0,0.38)'); fade.addColorStop(0.45, 'rgba(0,0,0,0.07)'); fade.addColorStop(1, 'rgba(0,0,0,0)')
+  ctx.fillStyle = fade; ctx.fillRect(0, floorTopY - 4, W, fadeH + 4)
   ctx.restore()
 
-  // Pass 6: epoxy sheen
+  /* Pass 6: epoxy sheen */
   ctx.save()
   ctx.beginPath()
-  ctx.moveTo(poly[0][0] * W, poly[0][1] * H)
-  ctx.lineTo(poly[1][0] * W, poly[1][1] * H)
-  ctx.lineTo(poly[2][0] * W, poly[2][1] * H)
-  ctx.lineTo(poly[3][0] * W, poly[3][1] * H)
-  ctx.closePath()
-  ctx.clip()
+  ctx.moveTo(poly[0][0]*W, poly[0][1]*H); ctx.lineTo(poly[1][0]*W, poly[1][1]*H)
+  ctx.lineTo(poly[2][0]*W, poly[2][1]*H); ctx.lineTo(poly[3][0]*W, poly[3][1]*H)
+  ctx.closePath(); ctx.clip()
   const sheenH = (H - floorTopY) * 0.26
-  const sheen  = ctx.createLinearGradient(0, floorTopY, 0, floorTopY + sheenH)
-  sheen.addColorStop(0, 'rgba(255,255,255,0.055)')
-  sheen.addColorStop(1, 'rgba(255,255,255,0.000)')
-  ctx.fillStyle = sheen
-  ctx.fillRect(0, floorTopY, W, sheenH)
+  const sheen = ctx.createLinearGradient(0, floorTopY, 0, floorTopY + sheenH)
+  sheen.addColorStop(0, 'rgba(255,255,255,0.055)'); sheen.addColorStop(1, 'rgba(255,255,255,0)')
+  ctx.fillStyle = sheen; ctx.fillRect(0, floorTopY, W, sheenH)
   ctx.restore()
 
-  // Pass 7: watermark
-  ctx.globalCompositeOperation = 'source-over'
-  ctx.globalAlpha = 1
-  ctx.font = 'bold 13px Poppins, sans-serif'
+  /* Pass 7: watermark */
+  ctx.font = 'bold 12px Poppins,sans-serif'
   ctx.fillStyle = 'rgba(255,255,255,0.50)'
-  ctx.textAlign = 'right'
-  ctx.textBaseline = 'bottom'
+  ctx.textAlign = 'right'; ctx.textBaseline = 'bottom'
   ctx.fillText('FloorVision Pro — Powered by Xtreme Polishing Systems', W - 10, H - 8)
 }
 
-// ─── PAGE ─────────────────────────────────────────────────────────────────────
+/* ══════════════════════════════════════════════════════════════════════════════
+   PAGE COMPONENT — Torginol visualizer layout clone
+   Left: full-height canvas render area
+   Right: 380px white panel with Rooms / Blends / Customize tabs
+══════════════════════════════════════════════════════════════════════════════ */
 export default function VisualizerPage() {
-  const [tab, setTab]         = useState<Tab>('Rooms')
-  const [room, setRoom]       = useState<Room>(ROOMS[0])
-  const [size, setSize]       = useState('18')
-  const [blend, setBlend]     = useState<Blend>(
+  const [step, setStep]           = useState<'rooms'|'blends'|'customize'>('rooms')
+  const [room, setRoom]           = useState<Room>(ROOMS[0])
+  const [size, setSize]           = useState('18')
+  const [blend, setBlend]         = useState<Blend>(
     ALL_BLENDS.find(b => b.id.endsWith('-18')) || ALL_BLENDS[0]
   )
-  const [collection, setCollection] = useState('All')
-  const [search, setSearch]         = useState('')
-  const [coverage, setCoverage]     = useState(85)
-  const [rendering, setRendering]   = useState(false)
-  const [rendered, setRendered]     = useState(false)
-  const [customPhoto, setCustomPhoto] = useState<string | null>(null)
-  const [saveEmail, setSaveEmail]   = useState('')
-  const [saved, setSaved]           = useState(false)
+  const [collection, setColl]     = useState('All')
+  const [search, setSearch]       = useState('')
+  const [coverage, setCoverage]   = useState(85)
+  const [rendering, setRendering] = useState(false)
+  const [rendered, setRendered]   = useState(false)
+  const [customPhoto, setCustom]  = useState<string | null>(null)
+  const [saveEmail, setEmail]     = useState('')
+  const [saved, setSaved]         = useState(false)
 
-  const canvasRef     = useRef<HTMLCanvasElement>(null)
-  const fileRef       = useRef<HTMLInputElement>(null)
-  const resultDataRef = useRef<string>('')
+  const canvasRef   = useRef<HTMLCanvasElement>(null)
+  const fileRef     = useRef<HTMLInputElement>(null)
+  const resultRef   = useRef('')
 
-  const collections = ['All', ...Array.from(new Set(
-    ALL_BLENDS.map(b => b.collection).filter(Boolean)
-  ))]
-
+  /* ── blend filtering ────────────────────────────────────────────────────── */
+  const collections = ['All', ...Array.from(new Set(ALL_BLENDS.map(b => b.collection).filter(Boolean)))]
   const filtered = ALL_BLENDS.filter(b => {
-    const isFB    = b.id.includes('-FB')
-    const bSized  = !isFB || b.id.endsWith(`-${size}`)
-    const bColl   = collection === 'All' || b.collection === collection
-    const bSearch = !search
-      || b.name.toLowerCase().includes(search.toLowerCase())
-      || b.tags.some(t => t.toLowerCase().includes(search.toLowerCase()))
-    return bSized && bColl && bSearch
+    const isFB   = b.id.includes('-FB')
+    const bSized = !isFB || b.id.endsWith(`-${size}`)
+    const bColl  = collection === 'All' || b.collection === collection
+    const bSrch  = !search || b.name.toLowerCase().includes(search.toLowerCase()) ||
+                   b.tags.some(t => t.toLowerCase().includes(search.toLowerCase()))
+    return bSized && bColl && bSrch
   })
 
+  /* ── render ─────────────────────────────────────────────────────────────── */
   const render = useCallback(async () => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-    setRendering(true)
-    setRendered(false)
+    const canvas = canvasRef.current; if (!canvas) return
+    setRendering(true); setRendered(false)
     try {
-      const bgUrl  = customPhoto || room.background
-      const roomId = customPhoto ? 'custom' : room.id
-      await compositeFloor(canvas, roomId, bgUrl, blend.img_url, coverage)
-      resultDataRef.current = canvas.toDataURL('image/jpeg', 0.92)
+      await compositeFloor(canvas, customPhoto ? 'custom' : room.id,
+                           customPhoto || room.background, blend.img_url, coverage)
+      resultRef.current = canvas.toDataURL('image/jpeg', 0.92)
       setRendered(true)
     } catch (err) {
-      console.error('Render error:', err)
-      // graceful fallback
+      console.error(err)
       const ctx = canvas.getContext('2d')!
       canvas.width = W; canvas.height = H
-      ctx.fillStyle = '#111'
-      ctx.fillRect(0, 0, W, H)
-      try {
-        const bi = await loadImg(blend.img_url)
-        ctx.globalAlpha = 0.65; ctx.drawImage(bi, 0, 0, W, H); ctx.globalAlpha = 1
-      } catch {}
-      ctx.font = 'bold 18px Poppins,sans-serif'
-      ctx.fillStyle = 'rgba(255,255,255,0.85)'
-      ctx.textAlign = 'center'
-      ctx.fillText(`${blend.name} · ${room.name}`, W / 2, 36)
-      ctx.font = '13px Poppins,sans-serif'
-      ctx.fillStyle = 'rgba(255,255,255,0.45)'
-      ctx.fillText('Room image unavailable from CDN', W / 2, 60)
-      resultDataRef.current = canvas.toDataURL('image/jpeg', 0.92)
+      ctx.fillStyle = '#f7f7f7'; ctx.fillRect(0, 0, W, H)
+      try { const bi = await loadImg(blend.img_url); ctx.globalAlpha = 0.65; ctx.drawImage(bi, 0, 0, W, H); ctx.globalAlpha = 1 } catch {}
+      ctx.font = 'bold 16px Poppins,sans-serif'
+      ctx.fillStyle = '#231F20'; ctx.textAlign = 'center'
+      ctx.fillText(`${blend.name} · ${room.name}`, W/2, 36)
+      ctx.font = '13px Poppins'; ctx.fillStyle = '#999'
+      ctx.fillText('Room image unavailable from CDN', W/2, 60)
+      resultRef.current = canvas.toDataURL('image/jpeg', 0.92)
       setRendered(true)
     }
     setRendering(false)
   }, [room, blend, coverage, customPhoto])
 
-  useEffect(() => { if (tab === 'Customize') render() }, [tab, render])
+  useEffect(() => { if (step === 'customize') render() }, [step, render])
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { if (tab === 'Customize') render() }, [room, blend, coverage])
+  useEffect(() => { if (step === 'customize') render() }, [room, blend, coverage])
 
   const download = () => {
     const a = document.createElement('a')
-    a.href = resultDataRef.current
-    a.download = `floorvision-${blend.name.replace(/\s+/g, '-').toLowerCase()}.jpg`
+    a.href = resultRef.current
+    a.download = `floorvision-${blend.name.replace(/\s+/g,'-').toLowerCase()}.jpg`
     a.click()
   }
 
   const handleUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]; if (!file) return
+    const f = e.target.files?.[0]; if (!f) return
     const reader = new FileReader()
-    reader.onload = ev => { setCustomPhoto(ev.target?.result as string); setTab('Customize') }
-    reader.readAsDataURL(file)
+    reader.onload = ev => { setCustom(ev.target?.result as string); setStep('customize') }
+    reader.readAsDataURL(f)
   }
 
-  const handleSave = (e: React.FormEvent) => {
-    e.preventDefault(); setSaved(true); setTimeout(() => setSaved(false), 4000)
+  /* ── TORGINOL UI TOKENS ────────────────────────────────────────────────── */
+  const T = {
+    bg:           '#FFFFFF',
+    bgAlt:        '#F7F7F7',
+    border:       '#E5E5E5',
+    text:         '#231F20',
+    textMuted:    '#7C7C7C',
+    accent:       '#E31837',
+    panelW:       380,
+    tabH:         48,
+    fontH:        "'Poppins', sans-serif",
+    fontB:        "'Open Sans', sans-serif",
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
+  const pillStyle = (active: boolean) => ({
+    padding: '5px 14px', borderRadius: 20,
+    fontFamily: T.fontH, fontWeight: 700, fontSize: 11,
+    letterSpacing: '0.06em', textTransform: 'uppercase' as const,
+    border: `1.5px solid ${active ? T.accent : T.border}`,
+    background: active ? `${T.accent}14` : 'transparent',
+    color: active ? T.accent : T.textMuted,
+    cursor: 'pointer', whiteSpace: 'nowrap' as const,
+  })
+
+  /* ── RENDER ────────────────────────────────────────────────────────────── */
   return (
-    <div style={{ paddingTop: 64, minHeight: '100vh' }}>
+    <div style={{ paddingTop: 'var(--nav-h)', height: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
 
-      {/* ── Top bar ── */}
-      <div style={{ borderBottom:'1px solid var(--border)', background:'var(--surface)', padding:'12px 0' }}>
-        <div className="container" style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:16 }}>
-          <span style={{ fontFamily:'Barlow Condensed', fontWeight:900, fontSize:22, textTransform:'uppercase' }}>
-            FLOOR<span style={{ color:'#C9A84C' }}>VISION</span> PRO
-            <span style={{ fontFamily:'Barlow', fontWeight:400, fontSize:13, color:'rgba(240,237,232,0.4)', marginLeft:12, textTransform:'none' }}>
-              451 blends · 16 rooms
+      {/* ── PAGE HEADER — white, Torginol-style ─────────────────────────── */}
+      <div style={{
+        background: T.bg, borderBottom: `1px solid ${T.border}`,
+        padding: '10px 0', flexShrink: 0
+      }}>
+        <div className="container" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
+          <div>
+            <span style={{ fontFamily: T.fontH, fontWeight: 800, fontSize: 18, textTransform: 'uppercase', letterSpacing: '0.02em', color: T.text }}>
+              Floor<span style={{ color: T.accent }}>Vision</span> Pro
             </span>
-          </span>
-          <div style={{ display:'flex', gap:10 }}>
+            <span style={{ fontFamily: T.fontB, fontSize: 12, color: T.textMuted, marginLeft: 14 }}>
+              {filtered.length} blends · 16 rooms · Real FloorWiz CDN
+            </span>
+          </div>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
             <button onClick={() => fileRef.current?.click()}
-              style={{ fontFamily:'Poppins', fontWeight:600, fontSize:13, padding:'8px 16px', borderRadius:6,
-                       border:'1px solid var(--border)', background:'transparent', color:'var(--text)', cursor:'pointer',
-                       display:'flex', alignItems:'center', gap:6 }}>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              style={{ fontFamily: T.fontH, fontWeight: 700, fontSize: 11, letterSpacing: '0.06em',
+                       textTransform: 'uppercase', padding: '8px 16px', borderRadius: 4,
+                       border: `1.5px solid ${T.border}`, background: 'transparent',
+                       color: T.text, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                 <rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/>
                 <path d="M21 15l-5-5L5 21"/>
               </svg>
-              Upload Photo
+              Upload My Photo
             </button>
             {rendered && (
-              <button onClick={download} className="btn-primary" style={{ fontSize:13, padding:'8px 18px' }}>
+              <button onClick={download} style={{
+                fontFamily: T.fontH, fontWeight: 700, fontSize: 11, letterSpacing: '0.06em',
+                textTransform: 'uppercase', padding: '8px 18px', borderRadius: 4,
+                background: T.text, color: '#fff', border: 'none', cursor: 'pointer'
+              }}>
                 ↓ Download
               </button>
             )}
           </div>
-          <input ref={fileRef} type="file" accept="image/*" onChange={handleUpload} style={{ display:'none' }}/>
+          <input ref={fileRef} type="file" accept="image/*" onChange={handleUpload} style={{ display: 'none' }}/>
         </div>
       </div>
 
-      {/* ── Layout ── */}
-      <div style={{ display:'flex', flexDirection:'column', height:'calc(100vh - 130px)' }} className="viz-main">
+      {/* ── MAIN VISUALIZER LAYOUT ─────────────────────────────────────── */}
+      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }} className="viz-layout">
         <style>{`
-          @media(min-width:768px){ .viz-main{ flex-direction:row !important; } }
           @media(max-width:767px){
-            .viz-panel{ width:100%!important; height:420px!important; border-left:none!important; border-top:1px solid var(--border)!important; }
-            .viz-canvas{ flex:none!important; height:280px!important; }
+            .viz-layout { flex-direction: column !important; }
+            .viz-panel  { width: 100% !important; height: 50vh !important; border-left: none !important; border-top: 1px solid #E5E5E5 !important; }
+            .viz-canvas { height: 50vh !important; }
           }
         `}</style>
 
-        {/* ── Canvas area ── */}
-        <div className="viz-canvas" style={{ flex:1, position:'relative', background:'#1a1a1a', overflow:'hidden' }}>
-          {tab === 'Customize' ? (
+        {/* ── CANVAS — left/main area ────────────────────────────────────── */}
+        <div className="viz-canvas" style={{
+          flex: 1, position: 'relative',
+          background: step === 'customize' ? '#1a1a1a' : T.bgAlt,
+          overflow: 'hidden'
+        }}>
+          {step === 'customize' ? (
             <>
               <canvas ref={canvasRef}
-                style={{ width:'100%', height:'100%', display:'block', objectFit:'contain' }}
+                style={{ width: '100%', height: '100%', display: 'block', objectFit: 'contain' }}
                 aria-label="Floor visualization"
               />
               {rendering && (
-                <div style={{ position:'absolute', inset:0, display:'flex', flexDirection:'column',
-                              alignItems:'center', justifyContent:'center',
-                              background:'rgba(10,10,10,0.75)', color:'white', gap:12 }}>
-                  <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#C9A84C" strokeWidth="2">
+                <div style={{
+                  position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
+                  alignItems: 'center', justifyContent: 'center',
+                  background: 'rgba(255,255,255,0.85)', gap: 12
+                }}>
+                  <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke={T.accent} strokeWidth="2.5">
                     <path d="M21 12a9 9 0 11-6.219-8.56">
                       <animateTransform attributeName="transform" type="rotate"
-                        from="0 12 12" to="360 12 12" dur="0.9s" repeatCount="indefinite"/>
+                        from="0 12 12" to="360 12 12" dur="0.85s" repeatCount="indefinite"/>
                     </path>
                   </svg>
-                  <span style={{ fontFamily:'Poppins', fontSize:13, color:'rgba(255,255,255,0.7)' }}>
+                  <span style={{ fontFamily: T.fontB, fontSize: 13, color: T.textMuted }}>
                     Rendering floor…
                   </span>
                 </div>
               )}
               {!rendering && !rendered && (
-                <div style={{ position:'absolute', inset:0, display:'flex', alignItems:'center',
-                              justifyContent:'center', color:'rgba(255,255,255,0.35)',
-                              fontFamily:'Poppins', fontSize:14 }}>
-                  Click "Visualize on Floor →" to render
+                <div style={{
+                  position: 'absolute', inset: 0, display: 'flex', alignItems: 'center',
+                  justifyContent: 'center', flexDirection: 'column', gap: 16
+                }}>
+                  <p style={{ fontFamily: T.fontB, fontSize: 14, color: T.textMuted }}>
+                    Click &ldquo;Visualize on Floor&rdquo; to render
+                  </p>
                 </div>
               )}
             </>
           ) : (
-            <div style={{ display:'flex', alignItems:'center', justifyContent:'center',
-                          height:'100%', flexDirection:'column', gap:12 }}>
+            /* Preview mode — show selected room image */
+            <div style={{
+              width: '100%', height: '100%',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              flexDirection: 'column', gap: 16, padding: 32
+            }}>
               <img src={room.background} alt={room.name} crossOrigin="anonymous"
-                style={{ maxWidth:'100%', maxHeight:'100%', objectFit:'contain', opacity:0.85 }}
+                style={{ maxWidth: '100%', maxHeight: 'calc(100% - 60px)', objectFit: 'contain' }}
               />
-              <p style={{ color:'rgba(255,255,255,0.3)', fontFamily:'Poppins', fontSize:12, margin:0 }}>
-                Select a blend then click Visualize →
+              <p style={{ fontFamily: T.fontB, fontSize: 13, color: T.textMuted }}>
+                {room.name} — Select a blend, then click Visualize →
               </p>
             </div>
           )}
         </div>
 
-        {/* ── Panel ── */}
-        <div className="viz-panel"
-          style={{ width:380, borderLeft:'1px solid var(--border)', background:'var(--surface)',
-                   display:'flex', flexDirection:'column', overflow:'hidden' }}>
-
-          {/* tabs */}
-          <div style={{ display:'flex', borderBottom:'1px solid var(--border)' }}>
-            {TABS.map(t => (
-              <button key={t} onClick={() => setTab(t)} style={{
-                flex:1, padding:'14px 0', fontFamily:'Poppins', fontWeight:600, fontSize:13,
-                border:'none', cursor:'pointer', background:'transparent',
-                color: tab === t ? '#C9A84C' : 'rgba(240,237,232,0.5)',
-                borderBottom: tab === t ? '2px solid #C9A84C' : '2px solid transparent',
-                transition:'all 0.15s'
-              }}>{t}</button>
+        {/* ── PANEL — right side, white Torginol style ─────────────────── */}
+        <div className="viz-panel" style={{
+          width: T.panelW, background: T.bg,
+          borderLeft: `1px solid ${T.border}`,
+          display: 'flex', flexDirection: 'column', overflow: 'hidden'
+        }}>
+          {/* Tabs */}
+          <div style={{ display: 'flex', borderBottom: `1px solid ${T.border}`, flexShrink: 0 }}>
+            {([['rooms','ROOMS'],['blends','BLENDS'],['customize','CUSTOMIZE']] as const).map(([id, label]) => (
+              <button key={id} onClick={() => setStep(id)} style={{
+                flex: 1, height: T.tabH,
+                fontFamily: T.fontH, fontWeight: 700, fontSize: 12,
+                letterSpacing: '0.08em', textTransform: 'uppercase',
+                background: 'transparent', border: 'none', cursor: 'pointer',
+                color: step === id ? T.accent : T.textMuted,
+                borderBottom: step === id ? `2px solid ${T.accent}` : '2px solid transparent',
+                transition: 'all 0.15s'
+              }}>{label}</button>
             ))}
           </div>
 
-          <div style={{ flex:1, overflowY:'auto', padding:'16px' }}>
+          {/* Tab content */}
+          <div style={{ flex: 1, overflowY: 'auto', padding: '16px' }}>
 
-            {/* ─ ROOMS ─ */}
-            {tab === 'Rooms' && (
+            {/* ─── ROOMS TAB ──────────────────────────────────────────── */}
+            {step === 'rooms' && (
               <div>
                 {(['Residential','Outdoor','Commercial'] as const).map(type => {
                   const list = ROOMS.filter(r => r.type === type)
                   return (
-                    <div key={type} style={{ marginBottom:20 }}>
-                      <p style={{ fontFamily:'Poppins', fontWeight:600, fontSize:11,
-                                  color:'rgba(240,237,232,0.4)', textTransform:'uppercase',
-                                  letterSpacing:'0.08em', margin:'0 0 10px' }}>{type}</p>
-                      <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:8 }}>
+                    <div key={type} style={{ marginBottom: 24 }}>
+                      <p style={{
+                        fontFamily: T.fontH, fontWeight: 700, fontSize: 10,
+                        letterSpacing: '0.12em', textTransform: 'uppercase',
+                        color: T.textMuted, marginBottom: 10
+                      }}>{type}</p>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
                         {list.map(r => (
-                          <button key={r.id} onClick={() => { setRoom(r); setTab('Blends') }}
-                            style={{ background: room.id === r.id ? 'rgba(201,168,76,0.15)' : 'rgba(255,255,255,0.04)',
-                                     border: room.id === r.id ? '1.5px solid #C9A84C' : '1px solid var(--border)',
-                                     borderRadius:8, padding:0, cursor:'pointer', overflow:'hidden', transition:'all 0.15s' }}>
+                          <button key={r.id}
+                            onClick={() => { setRoom(r); setStep('blends') }}
+                            style={{
+                              background: '#fff', padding: 0, cursor: 'pointer', overflow: 'hidden',
+                              borderRadius: 4, border: `1.5px solid ${room.id === r.id ? T.accent : T.border}`,
+                              boxShadow: room.id === r.id ? `0 0 0 1px ${T.accent}` : 'none',
+                              transition: 'all 0.15s'
+                            }}>
                             <img src={r.thumb} alt={r.name} loading="lazy" crossOrigin="anonymous"
-                              style={{ width:'100%', aspectRatio:'1/1', objectFit:'cover', display:'block' }}/>
-                            <p style={{ fontFamily:'Poppins', fontSize:10, fontWeight:500,
-                                        color:'rgba(240,237,232,0.7)', margin:'5px 4px',
-                                        textAlign:'center', lineHeight:1.3 }}>{r.name}</p>
+                              style={{ width: '100%', aspectRatio: '1/1', objectFit: 'cover', display: 'block' }}
+                            />
+                            <p style={{
+                              fontFamily: T.fontB, fontSize: 10, fontWeight: 600,
+                              color: room.id === r.id ? T.accent : T.text,
+                              margin: '5px 4px', textAlign: 'center', lineHeight: 1.3
+                            }}>{r.name}</p>
                           </button>
                         ))}
                       </div>
@@ -436,165 +405,203 @@ export default function VisualizerPage() {
               </div>
             )}
 
-            {/* ─ BLENDS ─ */}
-            {tab === 'Blends' && (
+            {/* ─── BLENDS TAB ─────────────────────────────────────────── */}
+            {step === 'blends' && (
               <div>
-                {/* Size picker */}
-                <div style={{ display:'flex', gap:8, marginBottom:14 }}>
-                  {['16','18','14'].map(s => (
-                    <button key={s} onClick={() => setSize(s)} style={{
-                      padding:'5px 14px', borderRadius:20, fontFamily:'Poppins', fontSize:12, fontWeight:600,
-                      cursor:'pointer', border:'1.5px solid',
-                      borderColor: size === s ? '#C9A84C' : 'var(--border)',
-                      background:  size === s ? 'rgba(201,168,76,0.12)' : 'transparent',
-                      color:       size === s ? '#C9A84C' : 'rgba(240,237,232,0.5)'
-                    }}>
-                      {s === '16' ? '1/16"' : s === '18' ? '1/8"' : '1/4"'}
-                    </button>
-                  ))}
+                {/* Chip size selector */}
+                <div style={{ marginBottom: 14 }}>
+                  <p style={{ fontFamily: T.fontH, fontWeight: 700, fontSize: 10, letterSpacing: '0.1em',
+                              textTransform: 'uppercase', color: T.textMuted, marginBottom: 8 }}>CHIP SIZE</p>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    {[['16','1/16"'],['18','1/8"'],['14','1/4"']].map(([s,l]) => (
+                      <button key={s} onClick={() => setSize(s)} style={pillStyle(size === s)}>
+                        {l}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-                <input value={search} onChange={e => setSearch(e.target.value)}
-                  placeholder="Search blends…"
-                  style={{ width:'100%', padding:'9px 12px', borderRadius:8,
-                           border:'1px solid var(--border)', background:'rgba(255,255,255,0.05)',
-                           color:'var(--text)', fontFamily:'Poppins', fontSize:13,
-                           marginBottom:12, boxSizing:'border-box' }}/>
-                <div style={{ display:'flex', gap:6, flexWrap:'wrap', marginBottom:14 }}>
+
+                {/* Search */}
+                <div style={{ marginBottom: 10, position: 'relative' }}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={T.textMuted} strokeWidth="2"
+                    style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)' }}>
+                    <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                  </svg>
+                  <input value={search} onChange={e => setSearch(e.target.value)}
+                    placeholder="Search blends…"
+                    style={{
+                      width: '100%', padding: '9px 12px 9px 32px', borderRadius: 4,
+                      border: `1px solid ${T.border}`, background: T.bgAlt,
+                      color: T.text, fontFamily: T.fontB, fontSize: 13,
+                      boxSizing: 'border-box' as const
+                    }}
+                  />
+                </div>
+
+                {/* Collections */}
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12 }}>
                   {collections.map(c => (
-                    <button key={c} onClick={() => setCollection(c)} style={{
-                      padding:'4px 12px', borderRadius:20, fontFamily:'Poppins', fontSize:11, fontWeight:600,
-                      cursor:'pointer', border:'1.5px solid', whiteSpace:'nowrap',
-                      borderColor: collection === c ? '#C9A84C' : 'var(--border)',
-                      background:  collection === c ? 'rgba(201,168,76,0.12)' : 'transparent',
-                      color:       collection === c ? '#C9A84C' : 'rgba(240,237,232,0.5)'
-                    }}>
-                      {c.replace(' Collection','').replace(' Blend','').toUpperCase()}
+                    <button key={c} onClick={() => setColl(c)} style={pillStyle(collection === c)}>
+                      {c.replace(' Collection','').replace(' Blend','').substring(0,12)}
                     </button>
                   ))}
                 </div>
-                <p style={{ fontFamily:'Poppins', fontSize:12, color:'rgba(240,237,232,0.35)', margin:'0 0 10px' }}>
+
+                <p style={{ fontFamily: T.fontB, fontSize: 11, color: T.textMuted, margin: '0 0 10px' }}>
                   {filtered.length} blends
                 </p>
-                <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:6 }}>
+
+                {/* Blend grid */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6 }}>
                   {filtered.map(b => (
                     <button key={b.id} onClick={() => setBlend(b)} style={{
-                      background: blend.id === b.id ? 'rgba(201,168,76,0.15)' : 'transparent',
-                      border: blend.id === b.id ? '1.5px solid #C9A84C' : '1px solid var(--border)',
-                      borderRadius:6, padding:0, cursor:'pointer', overflow:'hidden', transition:'border-color 0.12s'
+                      background: '#fff', padding: 0, cursor: 'pointer', overflow: 'hidden',
+                      borderRadius: 4, border: `1.5px solid ${blend.id === b.id ? T.accent : T.border}`,
+                      boxShadow: blend.id === b.id ? `0 0 0 1px ${T.accent}` : 'none',
+                      transition: 'border-color 0.12s'
                     }}>
                       <img src={b.img_url} alt={b.name} loading="lazy" crossOrigin="anonymous"
-                        style={{ width:'100%', aspectRatio:'1/1', objectFit:'cover', display:'block' }}/>
+                        style={{ width: '100%', aspectRatio: '1/1', objectFit: 'cover', display: 'block' }}
+                      />
                     </button>
                   ))}
                 </div>
               </div>
             )}
 
-            {/* ─ CUSTOMIZE ─ */}
-            {tab === 'Customize' && (
-              <div style={{ display:'flex', flexDirection:'column', gap:20 }}>
-                {blend && (
-                  <div style={{ display:'flex', gap:12, alignItems:'center', padding:'10px 12px',
-                                borderRadius:10, background:'rgba(255,255,255,0.05)', border:'1px solid var(--border)' }}>
-                    <img src={blend.img_url} alt={blend.name} crossOrigin="anonymous"
-                      style={{ width:52, height:52, objectFit:'cover', borderRadius:6 }}/>
-                    <div>
-                      <p style={{ fontFamily:'Barlow Condensed', fontWeight:700, fontSize:16,
-                                  textTransform:'uppercase', margin:0 }}>{blend.name}</p>
-                      <p style={{ fontFamily:'Poppins', fontSize:11, color:'rgba(240,237,232,0.4)', margin:0 }}>
-                        {room.name}
-                      </p>
-                    </div>
-                  </div>
-                )}
+            {/* ─── CUSTOMIZE TAB ──────────────────────────────────────── */}
+            {step === 'customize' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
 
-                {/* Coverage */}
+                {/* Active selection preview */}
+                <div style={{
+                  display: 'flex', gap: 12, alignItems: 'center', padding: '12px',
+                  borderRadius: 4, border: `1px solid ${T.border}`, background: T.bgAlt
+                }}>
+                  <img src={blend.img_url} alt={blend.name} crossOrigin="anonymous"
+                    style={{ width: 56, height: 56, objectFit: 'cover', borderRadius: 4, border: `1px solid ${T.border}` }}
+                  />
+                  <div>
+                    <p style={{ fontFamily: T.fontH, fontWeight: 700, fontSize: 14,
+                                textTransform: 'uppercase', color: T.text, margin: 0 }}>{blend.name}</p>
+                    <p style={{ fontFamily: T.fontB, fontSize: 12, color: T.textMuted, margin: 0 }}>{room.name}</p>
+                  </div>
+                </div>
+
+                {/* Coverage slider */}
                 <div>
-                  <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
-                    <label style={{ fontFamily:'Poppins', fontWeight:600, fontSize:13 }}>Blend Coverage</label>
-                    <span style={{ fontFamily:'Poppins', fontWeight:700, fontSize:15, color:'#C9A84C' }}>{coverage}%</span>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                    <label style={{ fontFamily: T.fontH, fontWeight: 700, fontSize: 11,
+                                   textTransform: 'uppercase', letterSpacing: '0.08em', color: T.text }}>
+                      BLEND COVERAGE
+                    </label>
+                    <span style={{ fontFamily: T.fontH, fontWeight: 700, fontSize: 15, color: T.accent }}>
+                      {coverage}%
+                    </span>
                   </div>
                   <input type="range" min={30} max={100} value={coverage}
                     onChange={e => setCoverage(Number(e.target.value))}
-                    style={{ width:'100%', accentColor:'#C9A84C' }}/>
-                  <div style={{ display:'flex', justifyContent:'space-between', fontFamily:'Poppins',
-                                fontSize:10, color:'rgba(240,237,232,0.35)', marginTop:4 }}>
+                    style={{ width: '100%', accentColor: T.accent }}
+                  />
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontFamily: T.fontB,
+                                fontSize: 10, color: T.textMuted, marginTop: 4 }}>
                     <span>Light</span><span>Standard</span><span>Full Broadcast</span>
                   </div>
                 </div>
 
+                {/* Re-render */}
                 <button onClick={render} disabled={rendering} style={{
-                  width:'100%', padding:'13px 0', borderRadius:8,
-                  background: rendering ? 'rgba(201,168,76,0.4)' : '#C9A84C',
-                  color:'#0A0A0A', fontFamily:'Poppins', fontWeight:700, fontSize:14,
-                  border:'none', cursor: rendering ? 'not-allowed' : 'pointer', transition:'background 0.15s'
+                  width: '100%', padding: '13px 0', borderRadius: 4,
+                  background: rendering ? '#bbb' : T.accent, color: '#fff',
+                  fontFamily: T.fontH, fontWeight: 700, fontSize: 12,
+                  letterSpacing: '0.08em', textTransform: 'uppercase',
+                  border: 'none', cursor: rendering ? 'not-allowed' : 'pointer'
                 }}>
-                  {rendering ? 'Rendering…' : '↻ Re-render Floor'}
+                  {rendering ? 'RENDERING…' : '↻ RE-RENDER FLOOR'}
                 </button>
 
+                {/* Download */}
                 {rendered && (
                   <button onClick={download} style={{
-                    width:'100%', padding:'13px 0', borderRadius:8,
-                    background:'rgba(201,168,76,0.12)', color:'#C9A84C',
-                    fontFamily:'Poppins', fontWeight:700, fontSize:14,
-                    border:'1.5px solid #C9A84C', cursor:'pointer'
-                  }}>↓ Download Image</button>
+                    width: '100%', padding: '13px 0', borderRadius: 4,
+                    background: T.text, color: '#fff',
+                    fontFamily: T.fontH, fontWeight: 700, fontSize: 12,
+                    letterSpacing: '0.08em', textTransform: 'uppercase',
+                    border: 'none', cursor: 'pointer'
+                  }}>↓ DOWNLOAD IMAGE</button>
                 )}
 
+                {/* Commerce buttons */}
                 <button style={{
-                  width:'100%', padding:'13px 0', borderRadius:8, background:'#4E6D98',
-                  color:'white', fontFamily:'Poppins', fontWeight:700, fontSize:14,
-                  border:'none', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', gap:8
-                }}>🛒 Add To Cart</button>
+                  width: '100%', padding: '13px 0', borderRadius: 4,
+                  background: '#fff', color: T.text,
+                  fontFamily: T.fontH, fontWeight: 700, fontSize: 12,
+                  letterSpacing: '0.08em', textTransform: 'uppercase',
+                  border: `1.5px solid ${T.text}`, cursor: 'pointer'
+                }}>ADD TO CART</button>
 
                 <button style={{
-                  width:'100%', padding:'12px 0', borderRadius:8, background:'transparent',
-                  color:'rgba(240,237,232,0.6)', fontFamily:'Poppins', fontWeight:500, fontSize:13,
-                  border:'1px solid var(--border)', cursor:'pointer'
-                }}>Request Free Sample</button>
+                  width: '100%', padding: '12px 0', borderRadius: 4,
+                  background: 'transparent', color: T.textMuted,
+                  fontFamily: T.fontH, fontWeight: 600, fontSize: 11,
+                  letterSpacing: '0.08em', textTransform: 'uppercase',
+                  border: `1px solid ${T.border}`, cursor: 'pointer'
+                }}>REQUEST FREE SAMPLE</button>
 
-                <form onSubmit={handleSave}>
-                  <p style={{ fontFamily:'Poppins', fontWeight:600, fontSize:12, textTransform:'uppercase',
-                              letterSpacing:'0.07em', color:'rgba(240,237,232,0.45)', margin:'0 0 8px' }}>
-                    Save Design Specs
+                {/* Save design */}
+                <form onSubmit={e => { e.preventDefault(); setSaved(true); setTimeout(()=>setSaved(false),4000) }}>
+                  <p style={{ fontFamily: T.fontH, fontWeight: 700, fontSize: 10, letterSpacing: '0.1em',
+                              textTransform: 'uppercase', color: T.textMuted, margin: '0 0 8px' }}>
+                    SAVE DESIGN SPECS
                   </p>
-                  <div style={{ display:'flex', gap:8 }}>
-                    <input type="email" value={saveEmail} onChange={e => setSaveEmail(e.target.value)}
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <input type="email" value={saveEmail} onChange={e => setEmail(e.target.value)}
                       placeholder="your@email.com"
-                      style={{ flex:1, padding:'9px 12px', borderRadius:8,
-                               border:'1px solid var(--border)', background:'rgba(255,255,255,0.05)',
-                               color:'var(--text)', fontFamily:'Poppins', fontSize:13 }}/>
+                      style={{
+                        flex: 1, padding: '9px 12px', borderRadius: 4,
+                        border: `1px solid ${T.border}`, background: T.bgAlt,
+                        color: T.text, fontFamily: T.fontB, fontSize: 13
+                      }}
+                    />
                     <button type="submit" style={{
-                      padding:'9px 18px', borderRadius:8, background:'#C9A84C', color:'#0A0A0A',
-                      fontFamily:'Poppins', fontWeight:700, fontSize:13, border:'none', cursor:'pointer'
-                    }}>{saved ? '✓' : 'Send'}</button>
+                      padding: '9px 18px', borderRadius: 4, background: T.accent,
+                      color: '#fff', fontFamily: T.fontH, fontWeight: 700, fontSize: 11,
+                      letterSpacing: '0.06em', textTransform: 'uppercase', border: 'none', cursor: 'pointer'
+                    }}>{saved ? '✓' : 'SEND'}</button>
                   </div>
                 </form>
 
-                <div style={{ display:'flex', gap:8 }}>
-                  <button onClick={() => setTab('Rooms')} style={{
-                    flex:1, padding:'9px 0', borderRadius:8, border:'1px solid var(--border)',
-                    background:'transparent', color:'rgba(240,237,232,0.6)',
-                    fontFamily:'Poppins', fontSize:12, cursor:'pointer'
-                  }}>Change Room</button>
-                  <button onClick={() => setTab('Blends')} style={{
-                    flex:1, padding:'9px 0', borderRadius:8, border:'1px solid var(--border)',
-                    background:'transparent', color:'rgba(240,237,232,0.6)',
-                    fontFamily:'Poppins', fontSize:12, cursor:'pointer'
-                  }}>Change Blend</button>
+                {/* Change room/blend links */}
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button onClick={() => setStep('rooms')} style={{
+                    flex: 1, padding: '8px 0', borderRadius: 4,
+                    border: `1px solid ${T.border}`, background: 'transparent',
+                    color: T.textMuted, fontFamily: T.fontH, fontWeight: 600,
+                    fontSize: 10, letterSpacing: '0.08em', textTransform: 'uppercase', cursor: 'pointer'
+                  }}>CHANGE ROOM</button>
+                  <button onClick={() => setStep('blends')} style={{
+                    flex: 1, padding: '8px 0', borderRadius: 4,
+                    border: `1px solid ${T.border}`, background: 'transparent',
+                    color: T.textMuted, fontFamily: T.fontH, fontWeight: 600,
+                    fontSize: 10, letterSpacing: '0.08em', textTransform: 'uppercase', cursor: 'pointer'
+                  }}>CHANGE BLEND</button>
                 </div>
               </div>
             )}
           </div>
 
-          {/* Visualize CTA */}
-          {tab !== 'Customize' && (
-            <div style={{ padding:'16px', borderTop:'1px solid var(--border)' }}>
-              <button onClick={() => setTab('Customize')} style={{
-                width:'100%', padding:'14px 0', borderRadius:8, background:'#C9A84C',
-                color:'#0A0A0A', fontFamily:'Poppins', fontWeight:700, fontSize:15,
-                border:'none', cursor:'pointer'
-              }}>Visualize on Floor →</button>
+          {/* ── VISUALIZE CTA (shown on rooms/blends tabs) ─────────────── */}
+          {step !== 'customize' && (
+            <div style={{ padding: '16px', borderTop: `1px solid ${T.border}`, flexShrink: 0 }}>
+              <button onClick={() => setStep('customize')} style={{
+                width: '100%', padding: '14px 0', borderRadius: 4,
+                background: T.accent, color: '#fff',
+                fontFamily: T.fontH, fontWeight: 700, fontSize: 13,
+                letterSpacing: '0.08em', textTransform: 'uppercase',
+                border: 'none', cursor: 'pointer'
+              }}>
+                VISUALIZE ON FLOOR →
+              </button>
             </div>
           )}
         </div>

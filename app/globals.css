@@ -1,97 +1,153 @@
-@import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;700;900&family=Barlow:wght@300;400;500;600&family=Poppins:wght@400;500;600;700;800&display=swap');
+/* ═══════════════════════════════════════════════════════════════════════════
+   FLOORVISION PRO — TORGINOL CLONE
+   Exact design tokens extracted from torginol.com live site
+   Font: Poppins (700 UPPERCASE headings) + Open Sans (body)
+   Colors: #231F20 text on #FFFFFF bg — NO dark mode
+═══════════════════════════════════════════════════════════════════════════ */
 
-*,*::before,*::after { box-sizing:border-box; margin:0; padding:0 }
+@import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&family=Poppins:wght@400;500;600;700;800&display=swap');
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 html, body {
   overflow-x: hidden;
   max-width: 100vw;
 }
 
+/* ── DESIGN TOKENS (Torginol-exact) ───────────────────────────────────── */
 :root {
-  --bg:        #0A0A0B;
-  --surface:   #111113;
-  --surface-2: #18181b;
-  --border:    rgba(255,255,255,0.08);
-  --text:      #F0EDE8;
-  --gold:      #C9A84C;
-  --radius:    8px;
+  /* Colors — from torginol.com getComputedStyle */
+  --color-text:        #231F20;   /* near-black — Torginol exact */
+  --color-text-muted:  #7C7C7C;   /* rgb(124,124,124) */
+  --color-bg:          #FFFFFF;
+  --color-bg-alt:      #F7F7F7;   /* light gray surface */
+  --color-bg-dark:     #231F20;   /* dark sections */
+  --color-accent:      #E31837;   /* Torginol red — their CTA color */
+  --color-accent-gold: #C9A84C;   /* XPS gold (secondary) */
+  --color-border:      #E5E5E5;
+  --color-border-dark: rgba(35,31,32,0.12);
+
+  /* Typography */
+  --font-heading:  'Poppins', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  --font-body:     'Open Sans', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+
+  /* Spacing */
+  --radius:  4px;
+  --radius-md: 8px;
+  --nav-h:   72px;
 }
 
+/* ── BASE ─────────────────────────────────────────────────────────────── */
 body {
-  font-family: 'Barlow', sans-serif;
-  background: var(--bg);
-  color: var(--text);
+  font-family: var(--font-body);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-size: 16px;
+  line-height: 1.5;
   -webkit-font-smoothing: antialiased;
 }
 
+a { color: inherit; text-decoration: none; }
+
+/* ── CONTAINER ────────────────────────────────────────────────────────── */
 .container {
   width: 100%;
   max-width: 1440px;
   margin: 0 auto;
-  padding: 0 24px;
+  padding: 0 32px;
 }
+@media (max-width: 768px) { .container { padding: 0 16px; } }
 
-@media (max-width: 768px) {
-  .container { padding: 0 16px; }
+/* ── TYPOGRAPHY — Torginol style ─────────────────────────────────────── */
+h1, h2, h3, h4, .h1, .h2, .h3 {
+  font-family: var(--font-heading);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text);
+  line-height: 1.2;
 }
+h1, .h1 { font-size: clamp(28px, 4vw, 48px); }
+h2, .h2 { font-size: clamp(22px, 3vw, 36px); }
+h3, .h3 { font-size: clamp(16px, 2vw, 24px); }
 
-.btn-primary {
+p { font-size: 15px; color: var(--color-text-muted); line-height: 1.65; }
+
+/* ── BUTTONS — Torginol style ────────────────────────────────────────── */
+.btn {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 12px 24px;
-  background: var(--gold);
-  color: #0A0A0B;
+  padding: 12px 28px;
+  font-family: var(--font-heading);
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   border: none;
   border-radius: var(--radius);
-  font-family: 'Poppins', sans-serif;
-  font-weight: 700;
-  font-size: 14px;
   cursor: pointer;
-  text-decoration: none;
-  transition: opacity 0.2s;
+  transition: background 0.15s, opacity 0.15s;
   white-space: nowrap;
 }
-.btn-primary:hover { opacity: 0.88; }
-.btn-primary:disabled { opacity: 0.5; cursor: default; }
+.btn-red {
+  background: var(--color-accent);
+  color: #fff;
+}
+.btn-red:hover { opacity: 0.88; }
+
+.btn-black {
+  background: var(--color-text);
+  color: #fff;
+}
+.btn-black:hover { opacity: 0.82; }
 
 .btn-outline {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 11px 22px;
   background: transparent;
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  font-family: 'Poppins', sans-serif;
-  font-weight: 600;
-  font-size: 14px;
-  cursor: pointer;
-  text-decoration: none;
-  transition: border-color 0.2s;
+  color: var(--color-text);
+  border: 2px solid var(--color-text);
 }
-.btn-outline:hover { border-color: var(--gold); color: var(--gold); }
+.btn-outline:hover { background: var(--color-text); color: #fff; }
 
+.btn-gold {
+  background: var(--color-accent-gold);
+  color: var(--color-text);
+}
+.btn-gold:hover { opacity: 0.88; }
+
+/* Legacy alias */
+.btn-primary { background: var(--color-accent); color: #fff; font-family: var(--font-heading); font-weight: 700; font-size: 13px; letter-spacing: 0.06em; text-transform: uppercase; display: inline-flex; align-items: center; gap: 8px; padding: 12px 28px; border: none; border-radius: var(--radius); cursor: pointer; white-space: nowrap; }
+.btn-primary:hover { opacity: 0.88; }
+.btn-primary:disabled { opacity: 0.4; cursor: default; }
+
+/* ── LABEL ────────────────────────────────────────────────────────────── */
 .label {
-  font-family: 'Poppins', sans-serif;
+  font-family: var(--font-heading);
   font-weight: 700;
   font-size: 11px;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: var(--gold);
+  color: var(--color-text-muted);
 }
 
-.gold-grad {
-  background: linear-gradient(90deg, #C9A84C, #e8c96c);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+/* ── DIVIDER ──────────────────────────────────────────────────────────── */
+hr { border: none; border-top: 1px solid var(--color-border); margin: 24px 0; }
+
+/* ── PRODUCT CARD ─────────────────────────────────────────────────────── */
+.product-card {
+  background: #fff;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  transition: box-shadow 0.2s;
+  cursor: pointer;
+}
+.product-card:hover {
+  box-shadow: 0 4px 20px rgba(35,31,32,0.12);
 }
 
-section { padding: 80px 0; }
-
-/* scrollbar */
-::-webkit-scrollbar { width: 4px; height: 4px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 2px; }
+/* ── SELECTED STATE ───────────────────────────────────────────────────── */
+.selected {
+  border-color: var(--color-accent) !important;
+  box-shadow: 0 0 0 2px var(--color-accent) !important;
+}

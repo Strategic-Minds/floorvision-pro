@@ -1,83 +1,53 @@
-import type { Metadata, Viewport } from 'next'
+import type { Metadata } from 'next'
 import './globals.css'
-import Nav from '../components/Nav'
-
-export const viewport: Viewport = {
-  themeColor: '#C9A84C',
-  width: 'device-width',
-  initialScale: 1,
-  viewportFit: 'cover',
-}
+import NavClient from './NavClient'
 
 export const metadata: Metadata = {
-  title: 'FloorVision Pro | Professional Epoxy Floor Visualizer',
-  description: '451 real XPS & Torginol epoxy floor blends. Interactive visualizer, 26 room environments, download results. Powered by Xtreme Polishing Systems.',
-  keywords: 'epoxy floor visualizer, epoxy colors, polymer flake, metallic epoxy, floor color charts, XPS, Torginol, FloorWiz',
-  manifest: '/manifest.json',
-  appleWebApp: { capable: true, statusBarStyle: 'black-translucent', title: 'FloorVision Pro' },
-  openGraph: {
-    title: 'FloorVision Pro — 451 Epoxy Blends',
-    description: 'Real FloorWiz technology. 451 XPS blends, 26 rooms, photo upload, instant download.',
-    type: 'website',
-  },
-  other: {
-    'mobile-web-app-capable': 'yes',
-    'apple-mobile-web-app-capable': 'yes',
-    'apple-mobile-web-app-status-bar-style': 'black-translucent',
-    'apple-touch-icon': '/icon-192.png',
-  }
+  title: 'FloorVision Pro — Floor Design Visualizer | Powered by XPS',
+  description: 'Visualize 451 epoxy flake blends in your own space. 451 blends, 16 rooms, real FloorWiz CDN.',
+  keywords: 'epoxy floor visualizer, flake epoxy, floor coating visualizer, XPS',
+  openGraph: { title: 'FloorVision Pro', description: 'Visualize 451 epoxy flake blends.', type: 'website' },
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
       <head>
-        <link rel="apple-touch-icon" href="/icon-192.png"/>
-        <meta name="apple-mobile-web-app-capable" content="yes"/>
-        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+        <meta name="theme-color" content="#ffffff" />
+        <link rel="manifest" href="/manifest.webmanifest" />
       </head>
       <body>
-        <Nav />
+        <NavClient />
         <main>{children}</main>
-        <Footer />
-      </body>
-    </html>
-  )
-}
-
-function Footer() {
-  return (
-    <footer style={{ borderTop:'1px solid rgba(255,255,255,0.07)', padding:'48px 0 32px', marginTop:80 }}>
-      <div className="container">
-        <div style={{ display:'grid', gridTemplateColumns:'2fr 1fr 1fr 1fr', gap:40, marginBottom:40 }}>
-          <div>
-            <div style={{ fontFamily:'Barlow Condensed', fontWeight:900, fontSize:24, marginBottom:12 }}>
-              FLOOR<span style={{ color:'#C9A84C' }}>VISION</span> PRO
-            </div>
-            <p style={{ color:'rgba(240,237,232,0.45)', fontSize:14, lineHeight:1.7, maxWidth:280 }}>
-              The most powerful epoxy floor visualizer built on real FloorWiz technology. 451 XPS blends, 26 room environments.
-            </p>
-          </div>
-          {[
-            { title:'Visualizer', links:[['Open Visualizer','/visualizer'],['Color Charts','/color-charts'],['Gallery','/gallery']] },
-            { title:'Collections', links:[['Insignia Series','/color-charts'],['Torginol Blends','/color-charts'],['UV Collection','/color-charts']] },
-            { title:'Company', links:[['Request Sample','/request-sample'],['XPS Store','https://xtremepolishingsystems.com'],['Torginol','https://torginol.com']] },
-          ].map(col => (
-            <div key={col.title}>
-              <div className="label" style={{ marginBottom:16 }}>{col.title}</div>
-              {col.links.map(([label, href]) => (
-                <a key={label} href={href} style={{ display:'block', color:'rgba(240,237,232,0.45)', fontSize:14, textDecoration:'none', marginBottom:8 }}>{label}</a>
+        <footer style={{ background:'#231F20', color:'rgba(255,255,255,0.6)', padding:'48px 0 24px', marginTop:80 }}>
+          <div className="container">
+            <div style={{ display:'flex', gap:48, flexWrap:'wrap', marginBottom:40 }}>
+              <div style={{ flex:'0 0 240px' }}>
+                <div style={{ fontFamily:'var(--font-heading)', fontWeight:800, fontSize:18, color:'#fff', letterSpacing:'0.02em', textTransform:'uppercase', marginBottom:12 }}>
+                  Floor<span style={{ color:'var(--color-accent)' }}>Vision</span> Pro
+                </div>
+                <p style={{ fontSize:13, lineHeight:1.65, color:'rgba(255,255,255,0.5)' }}>
+                  The most powerful epoxy floor visualizer. 451 XPS blends. 16 real room environments.
+                </p>
+              </div>
+              {[
+                { head:'VISUALIZER', links:['Open Visualizer','Color Charts','Gallery'] },
+                { head:'COLLECTIONS', links:['Insignia Series','Torginol Blends','UV Collection'] },
+                { head:'COMPANY', links:['Request Sample','XPS Store','Torginol'] },
+              ].map(sec => (
+                <div key={sec.head}>
+                  <p style={{ fontFamily:'var(--font-heading)', fontWeight:700, fontSize:11, letterSpacing:'0.12em', textTransform:'uppercase', color:'rgba(255,255,255,0.3)', marginBottom:12 }}>{sec.head}</p>
+                  {sec.links.map(l => <a key={l} href="#" style={{ display:'block', fontSize:13, color:'rgba(255,255,255,0.6)', marginBottom:8 }}>{l}</a>)}
+                </div>
               ))}
             </div>
-          ))}
-        </div>
-        <div style={{ borderTop:'1px solid rgba(255,255,255,0.06)', paddingTop:24, display:'flex', justifyContent:'space-between', alignItems:'center' }}>
-          <span style={{ color:'rgba(240,237,232,0.25)', fontSize:13 }}>
-            © 2026 FloorVision Pro. Powered by <strong style={{ color:'rgba(240,237,232,0.45)' }}>Xtreme Polishing Systems</strong> — America&#39;s #1 Epoxy Superstore.
-          </span>
-          <span style={{ color:'rgba(240,237,232,0.2)', fontSize:12 }}>451 real blends · 26 rooms · FloorWiz CDN</span>
-        </div>
-      </div>
-    </footer>
+            <div style={{ borderTop:'1px solid rgba(255,255,255,0.1)', paddingTop:20, display:'flex', justifyContent:'space-between', fontSize:12, color:'rgba(255,255,255,0.35)', flexWrap:'wrap', gap:8 }}>
+              <span>© {new Date().getFullYear()} FloorVision Pro. Powered by Xtreme Polishing Systems — America&apos;s #1 Epoxy Superstore.</span>
+              <span>451 real blends · 16 rooms · FloorWiz CDN</span>
+            </div>
+          </div>
+        </footer>
+      </body>
+    </html>
   )
 }
