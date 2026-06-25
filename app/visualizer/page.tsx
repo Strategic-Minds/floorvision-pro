@@ -212,11 +212,15 @@ export default function VisualizerPage() {
         </div>
       </div>
 
-      {/* Main visualizer — FloorWiz layout: canvas left + 400px panel right */}
-      <div style={{ display:'flex', height:'calc(100vh - 130px)', overflow:'hidden' }}>
+      {/* Main visualizer — FloorWiz layout: canvas left + 400px panel right. Mobile: stacked */}
+      <div style={{ display:'flex', flexDirection:'column', height:'calc(100vh - 64px)' }} className="viz-main">
+      <style>{`
+        @media (min-width: 768px) { .viz-main { flex-direction: row !important; height: calc(100vh - 130px) !important; } }
+        @media (max-width: 767px) { .viz-panel { width: 100% !important; height: 420px !important; border-left: none !important; border-top: 1px solid var(--border) !important; } .viz-canvas { flex: none !important; height: 280px !important; } }
+      `}</style>
 
         {/* ── CANVAS AREA ── */}
-        <div style={{ flex:1, position:'relative', background:'#1a1a1a', overflow:'hidden' }}>
+        <div className="viz-canvas" style={{ flex:1, position:'relative', background:'#1a1a1a', overflow:'hidden' }}>
           {tab === 'Customize' ? (
             <>
               <canvas ref={canvasRef}
@@ -277,7 +281,7 @@ export default function VisualizerPage() {
         </div>
 
         {/* ── 400px RIGHT PANEL (exact FloorWiz dimensions) ── */}
-        <div style={{
+        <div className="viz-panel" style={{
           width: 400, flexShrink:0,
           background:'var(--surface)',
           borderLeft:'1px solid var(--border)',
